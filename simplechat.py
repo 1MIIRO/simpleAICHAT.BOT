@@ -4,7 +4,6 @@ from deep_translator import GoogleTranslator
 from googletrans import Translator as GoogleTranslatorV2
 from datetime import datetime
 import os
-from Atomfilehandler import AtomFileHandler
 import xml.etree.ElementTree as ET
 import os
 from collections import Counter
@@ -72,7 +71,148 @@ predefined_responses = {
     "vipi": "Niko vizuri! Na wewe vipi?",  # I'm good! How about you?
     "jina lako nani": "Mimi ni AI iliyoumbwa kuzungumza nawe! Jina langu ni BIBA.",  # I am an AI created to chat with you! My name is BIBA.
 }
+search_triggers = [
+    # English
+    "search location details",  
+    "find events in",  
+    "look up location",  
+    "check for events in", 
+    "search for earthquakes in",  
+    "any events in",  
+    
+    # French
+    "rechercher les détails du lieu",  # Search for location details
+    "trouver des événements à",  # Find events happening in a location
+    "consulter l'emplacement",  # Look up information about a place
+    "vérifier les événements à",  # Check for recorded events in a place
+    "rechercher des tremblements de terre à",  # Search for earthquakes in a specific location
+    "y a-t-il des événements à",  # Check if any events occurred in a place
+    
+    # Spanish
+    "buscar detalles de la ubicación",  # Search for location details
+    "encontrar eventos en",  # Find events happening in a location
+    "consultar la ubicación",  # Look up information about a place
+    "verificar eventos en",  # Check for recorded events in a place
+    "buscar terremotos en",  # Search for earthquakes in a specific location
+    "hay eventos en",  # Check if any events occurred in a place
+    
+    # Swahili
+    "tafuta maelezo ya eneo",  # Search for location details
+    "pata matukio katika",  # Find events happening in a location
+    "angalia eneo",  # Look up information about a place
+    "angalia matukio katika",  # Check for recorded events in a place
+    "tafuta matetemeko ya ardhi katika",  # Search for earthquakes in a specific location
+    "kuna matukio katika"  # Check if any events occurred in a place
+]
 
+# Function to extract unique locations from .atom files
+def extract_all_locations(folder_path):
+    """Extracts unique locations (places) from all .atom files in the folder."""
+    global unique_locations
+    unique_locations = set()
+    namespace = {'atom': 'http://www.w3.org/2005/Atom'}
+    
+    for filename in os.listdir(folder_path):
+        if filename.endswith('.atom'):
+            file_path = os.path.join(folder_path, filename)
+            try:
+                tree = ET.parse(file_path)
+                root = tree.getroot()
+
+                for entry in root.findall('atom:entry', namespace):
+                    title = entry.find('atom:title', namespace).text
+                    location_parts = title.split(' - ')
+
+                    if len(location_parts) > 1:
+                        city_place = location_parts[-1].split(', ')
+                        if len(city_place) == 2:
+                            unique_locations.add(city_place[1].strip())
+
+            except ET.ParseError:
+                print(f"Error parsing file: {file_path}")    
+
+# Function to search for event data in .atom files
+def parse_atom_file(file_path):
+    try:
+        tree = ET.parse(file_path)
+        root = tree.getroot()
+        return root
+    except ET.ParseError as e:
+        print(f"Error parsing file {file_path}: {e}")
+        return None
+
+def get_event_data(entry, namespace):
+    title = entry.find('atom:title', namespace).text
+    link = entry.find('atom:link', namespace).get('href')
+    published = entry.find('atom:updated', namespace).text
+    coordinates = entry.find('georss:point', namespace).text
+    elevation = entry.find('georss:elev', namespace).text
+
+    location_parts = title.split(' - ')
+    if len(location_parts) > 1:
+        city_place = location_parts[-1].split(', ')
+        if len(city_place) == 2:
+            city = city_place[0] 
+            place = city_place[1]  
+        else:
+            city, place = '', ''  
+    else:
+        city, place = '', ''
+
+    age = None
+    for category in entry.findall('atom:category', namespace):
+        if category.get('label') == 'Age':
+            age = category.get('term')
+
+    magnitude = None
+    for category in entry.findall('atom:category', namespace):
+        if category.get('label') == 'Magnitude':
+            magnitude = category.get('term')
+
+    event_data = {
+        'title': title,
+        'link': link,
+        'published': published,
+        'coordinates': coordinates,
+        'elevation': elevation,
+        'age': age,
+        'magnitude': magnitude,
+        'city': city,
+        'place': place
+    }
+
+    return event_data
+
+def search_atom_files(folder_path, search_place):
+    namespace = {'atom': 'http://www.w3.org/2005/Atom', 'georss': 'http://www.georss.org/georss'}
+    matching_entries = [] 
+
+    with open('displayfiles\display_search_results.txt', 'w') as result_file:
+        for filename in os.listdir(folder_path):
+            if filename.endswith('.atom'):
+                file_path = os.path.join(folder_path, filename)
+                root = parse_atom_file(file_path)
+                if root is not None:
+                    for entry in root.findall('atom:entry', namespace):
+                        event_data = get_event_data(entry, namespace)
+                        if search_place.lower() == event_data['place'].lower():
+                            matching_entries.append(event_data)
+
+        result_count = len(matching_entries)
+        print(f"Search complete! Found {result_count} matching entries. Results have been saved in the text file.")
+
+        if matching_entries:
+            for entry_data in matching_entries:
+                result_file.write(f"Title: {entry_data['title']}\n")
+                result_file.write(f"ID: {entry_data['link']}\n")
+                result_file.write(f"Published: {entry_data['published']}\n")
+                result_file.write(f"Coordinates: {entry_data['coordinates']}\n")
+                result_file.write(f"Elevation/Depth: {entry_data['elevation']}\n")
+                result_file.write(f"Occurred: {entry_data['age']}\n")
+                result_file.write(f"Magnitude: {entry_data['magnitude']}\n")
+                result_file.write("-" * 120 + "\n")
+        else:
+            print("No matching results were found for that place. Try another location.")
 # Function to generate a response based on the input
 def generate_response(input_text):
     # Check if the sentence ends with "Translate" and translate
@@ -93,9 +233,6 @@ def generate_response(input_text):
     if user_input_lower in predefined_responses:
         return predefined_responses[user_input_lower]
 
-    # Check if the input asks to show earthquake data
-    if "i want details on earthquake data file" in input_text.lower():
-        return handle_earthquake_data()
 
     # Add the user input to the conversation history (this will be used for context generation)
     conversation_history.append(f"Human: {input_text}")
@@ -108,7 +245,38 @@ def generate_response(input_text):
     
     # Create an attention mask: All tokens should be attended to (no padding)
     attention_mask = torch.ones(inputs.shape, device=inputs.device)
+      
+    # List of possible ways users may ask for locations
+    location_triggers = [
+        # English
+        "show locations", "list locations", "list places",
+        "display locations", "show places",
+        "where did events occur", "what locations are in the records",
+        "which places are available",
+        
+        # French
+        "afficher les emplacements", "lister les emplacements", "lister les lieux",
+        "afficher les lieux", "où les événements se sont-ils produits",
+        "quels lieux sont dans les archives", "quels endroits sont disponibles",
+        
+        # Spanish
+        "mostrar ubicaciones", "listar ubicaciones", "listar lugares",
+        "mostrar lugares", "dónde ocurrieron los eventos",
+        "qué ubicaciones están en los registros", "qué lugares están disponibles",
+        
+        # Swahili
+        "onyesha maeneo", "orodhesha maeneo", "orodhesha sehemu",
+        "onyesha sehemu", "wapi matukio yalitokea",
+        "ni maeneo gani yako kwenye rekodi", "ni sehemu zipi zinapatikana"
+    ]
     
+    if input_text.lower().strip() in location_triggers:
+        if unique_locations:
+            locations_list = "\n".join(sorted(unique_locations))
+            print(f"\nBIBA: Here are the locations found in the records:\n{locations_list}\n")
+        else:
+            print("\nBIBA: No locations found in the dataset.\n")
+
     # Generate a response with the following parameters:
     outputs = model.generate(
         inputs, 
@@ -132,26 +300,6 @@ def generate_response(input_text):
     return response.strip()
 
 # Function to handle earthquake data
-def handle_earthquake_data():
-    # Prompt the user for the file path
-    file_path = input("Please enter the file path of the earthquake data file: ")
-
-    # Check if the file exists (optional but good practice to avoid errors)
-    if not os.path.exists(file_path):
-        return "The file does not exist. Please check the file path and try again."
-
-    # Initialize AtomFileHandler with the provided file path
-    atom_handler = AtomFileHandler(file_path)
-    
-    # Perform processing on the earthquake data
-    atom_handler.write_atom_info(file_path)
-    atom_handler.process_and_separate_events(file_path)
-    atom_handler.group_events_by_location(file_path)
-    atom_handler.close_file()
-    
-    # Once the processing is done, reply with the success message
-    return "Details have been processed and saved in the respective files."
-
 
 
 # Function to translate the input text into Spanish, French, and Swahili using deep-translator
@@ -196,6 +344,7 @@ def get_current_time():
     current_time = datetime.now()
     return f"The current time is {current_time.strftime('%I:%M %p')}."
 
+extract_all_locations('user.atomfiles')
 # Chat loop
 print("Hello! I am your AI Chatbot BIBA powered by DialoGPT. Type 'exit' to end the conversation.")
 print("You can type your message followed by 'Translate' to get translations in Spanish, French, and Swahili.")
