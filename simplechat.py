@@ -8,6 +8,7 @@ import xml.etree.ElementTree as ET
 import os
 from collections import Counter
 import re
+import dateutil.parser
 
 
 # Load pre-trained DialoGPT model and tokenizer
@@ -140,6 +141,86 @@ def parse_atom_file(file_path):
     except ET.ParseError as e:
         print(f"Error parsing file {file_path}: {e}")
         return None
+# Function to parse date
+def parse_date(date_str):
+    try:
+        return dateutil.parser.parse(date_str).date()
+    except ValueError:
+        return None
+
+# Function to parse time
+def parse_time(time_str):
+    try:
+        return dateutil.parser.parse(time_str).time()
+    except ValueError:
+        return None
+
+def search_seismic_activity(folder_path, date_range_start, date_range_end, time_range_start, time_range_end):
+    namespace = {'atom': 'http://www.w3.org/2005/Atom', 'georss': 'http://www.georss.org/georss'}
+    matching_entries = []
+    result_file_path = 'displayfiles/display_search_results.txt'
+
+    with open(result_file_path, 'w', encoding='utf-8') as result_file:
+        for filename in os.listdir(folder_path):
+            if filename.endswith('.atom'):
+                file_path = os.path.join(folder_path, filename)
+                root = parse_atom_file(file_path)
+
+                if root is not None:
+                    for entry in root.findall('atom:entry', namespace):
+                        updated = entry.find('atom:updated', namespace).text
+
+                        title_elem = entry.find('atom:title', namespace)
+                        title = title_elem.text if title_elem is not None else "Unknown"
+
+                        coordinates_elem = entry.find('georss:point', namespace)
+                        coordinates = coordinates_elem.text if coordinates_elem is not None else "Unknown"
+
+                        elevation_elem = entry.find('georss:elev', namespace)
+                        elevation = elevation_elem.text if elevation_elem is not None else "Unknown"
+
+                        age = "N/A"
+                        magnitude = "N/A"
+
+                        for category in entry.findall('atom:category', namespace):
+                            if category.get('label') == 'Age':
+                                age = category.get('term')
+                            if category.get('label') == 'Magnitude':
+                                magnitude = category.get('term')
+
+                        entry_date = updated.split('T')[0]
+                        entry_time = updated.split('T')[1].split('Z')[0]
+
+                        entry_datetime = parse_date(entry_date)
+                        if date_range_start and date_range_end:
+                            if not (date_range_start <= entry_datetime <= date_range_end):
+                                continue
+
+                        entry_time_obj = parse_time(entry_time)
+                        if time_range_start and time_range_end:
+                            if not (time_range_start <= entry_time_obj <= time_range_end):
+                                continue
+
+                        matching_entries.append({
+                            'title': title,
+                            'published': updated,
+                            'coordinates': coordinates,
+                            'elevation': elevation,
+                            'age': age,
+                            'magnitude': magnitude
+                        })
+
+        if matching_entries:
+            for entry in matching_entries:
+                result_file.write(f"Title: {entry['title']}\n")
+                result_file.write(f"Published: {entry['published']}\n")
+                result_file.write(f"Coordinates: {entry['coordinates']}\n")
+                result_file.write(f"Elevation/Depth: {entry['elevation']}\n")
+                result_file.write(f"Occurred: {entry['age']}\n")
+                result_file.write(f"Magnitude: {entry['magnitude']}\n")
+                result_file.write("-" * 120 + "\n")
+
+    return result_file_path, len(matching_entries)
 
 def get_event_data(entry, namespace):
     title = entry.find('atom:title', namespace).text
@@ -159,16 +240,15 @@ def get_event_data(entry, namespace):
     else:
         city, place = '', ''
 
+    magnitude = None
+    match = re.search(r'M\s*([\d.]+)', title)
+    if match:
+        magnitude = float(match.group(1))  
+
     age = None
     for category in entry.findall('atom:category', namespace):
         if category.get('label') == 'Age':
             age = category.get('term')
-
-    magnitude = None
-    for category in entry.findall('atom:category', namespace):
-        if category.get('label') == 'Magnitude':
-            magnitude = category.get('term')
-
     event_data = {
         'title': title,
         'link': link,
@@ -183,38 +263,90 @@ def get_event_data(entry, namespace):
 
     return event_data
 
-def search_atom_files(folder_path, search_place):
-    namespace = {'atom': 'http://www.w3.org/2005/Atom', 'georss': 'http://www.georss.org/georss'}
-    matching_entries = [] 
 
-    with open('displayfiles\display_search_results.txt', 'w') as result_file:
+    
+# Function to check magnitude
+def check_magnitude(magnitude, search_type):
+    try:
+        if search_type.startswith('='):
+            return magnitude == float(search_type[1:])
+        elif search_type.startswith('<'):
+            if search_type.startswith('<='):
+                return magnitude <= float(search_type[2:])
+            return magnitude < float(search_type[1:])
+        elif search_type.startswith('>'):
+            if search_type.startswith('>='):
+                return magnitude >= float(search_type[2:])
+            return magnitude > float(search_type[1:])
+        else:
+            return magnitude == float(search_type)
+    except ValueError:
+        return False
+
+def search_magnitude(folder_path, search_type):
+    namespace = {'atom': 'http://www.w3.org/2005/Atom', 'georss': 'http://www.georss.org/georss'}
+    matching_entries = []
+    result_file_path = 'displayfiles//display_search_results.txt'
+
+    with open(result_file_path, 'w', encoding='utf-8') as result_file:
         for filename in os.listdir(folder_path):
             if filename.endswith('.atom'):
                 file_path = os.path.join(folder_path, filename)
                 root = parse_atom_file(file_path)
+
                 if root is not None:
                     for entry in root.findall('atom:entry', namespace):
                         event_data = get_event_data(entry, namespace)
-                        if search_place.lower() == event_data['place'].lower():
+                        if event_data['magnitude'] is not None and check_magnitude(event_data['magnitude'], search_type):
                             matching_entries.append(event_data)
 
-        result_count = len(matching_entries)
-        print(f"Search complete! Found {result_count} matching entries. Results have been saved in the text file.")
+                    if matching_entries:
+                        for entry in matching_entries:
+                            result_file.write(f"Title: {entry['title']}\n")
+                            result_file.write(f"Published: {entry['published']}\n")
+                            result_file.write(f"Coordinates: {entry['coordinates']}\n")
+                            result_file.write(f"Elevation/Depth: {entry['elevation']}\n")
+                            result_file.write(f"Occurred: {entry['age']}\n")
+                            result_file.write(f"Magnitude: {entry['magnitude']}\n")
+                            result_file.write("-" * 120 + "\n")
 
-        if matching_entries:
-            for entry_data in matching_entries:
-                result_file.write(f"Title: {entry_data['title']}\n")
-                result_file.write(f"ID: {entry_data['link']}\n")
-                result_file.write(f"Published: {entry_data['published']}\n")
-                result_file.write(f"Coordinates: {entry_data['coordinates']}\n")
-                result_file.write(f"Elevation/Depth: {entry_data['elevation']}\n")
-                result_file.write(f"Occurred: {entry_data['age']}\n")
-                result_file.write(f"Magnitude: {entry_data['magnitude']}\n")
-                result_file.write("-" * 120 + "\n")
-        else:
-            print("No matching results were found for that place. Try another location.")
+    return result_file_path, len(matching_entries)    
+
+def search_atom_files(folder_path, search_place):
+    namespace = {'atom': 'http://www.w3.org/2005/Atom', 'georss': 'http://www.georss.org/georss'}
+    matching_entries = []
+    result_file_path = 'displayfiles/display_search_results.txt'
+
+    with open(result_file_path, 'w', encoding='utf-8') as result_file:
+        for filename in os.listdir(folder_path):
+            if filename.endswith('.atom'):
+                file_path = os.path.join(folder_path, filename)
+                root = parse_atom_file(file_path)
+
+                if root is not None:
+                    for entry in root.findall('atom:entry', namespace):
+                        event_data = get_event_data(entry, namespace)
+                        if search_place.lower() == event_data.get('place', '').lower():
+                            matching_entries.append(event_data)
+
+                    if matching_entries:
+                        for entry in matching_entries:
+                            result_file.write(f"Title: {entry['title']}\n")
+                            result_file.write(f"Published: {entry['published']}\n")
+                            result_file.write(f"Coordinates: {entry['coordinates']}\n")
+                            result_file.write(f"Elevation/Depth: {entry['elevation']}\n")
+                            result_file.write(f"Occurred: {entry['age']}\n")
+                            result_file.write(f"Magnitude: {entry['magnitude']}\n")
+                            result_file.write("-" * 120 + "\n")
+
+    # Ensure the function always returns a tuple
+    return result_file_path, len(matching_entries)
+
+
+
 # Function to generate a response based on the input
 def generate_response(input_text):
+
     # Check if the sentence ends with "Translate" and translate
     if input_text.lower().endswith(" translate"):
         text_to_translate = input_text[:-9].strip()  # Remove the word "Translate"
@@ -232,6 +364,47 @@ def generate_response(input_text):
     
     if user_input_lower in predefined_responses:
         return predefined_responses[user_input_lower]
+    
+    view_seismic_triggers = [
+        "i would like to view seismic activity over a time range",
+        "je voudrais voir l'activité sismique sur une période de temps",  # French
+        "quisiera ver la actividad sísmica en un rango de tiempo",  # Spanish
+        "ningependa kuona shughuli za mitetemeko ya ardhi kwa muda fulani"  # Swahili
+    ]
+    
+    if any(trigger in input_text.lower() for trigger in view_seismic_triggers):
+        print("You can choose from the following options:")
+        print("1. Search by Date Range")
+        print("2. Search by Time Range")
+        print("3. Search by Both Date and Time Range")
+        search_type = input("Enter your choice (1/2/3): ").strip()
+
+        folder_path = 'user.atomfiles'
+        date_range_start, date_range_end, time_range_start, time_range_end = None, None, None, None
+
+        if search_type == '1':
+            date_range_start = parse_date(input("Enter start date (YYYY-MM-DD): ").strip())
+            date_range_end = parse_date(input("Enter end date (YYYY-MM-DD): ").strip())
+        elif search_type == '2':
+            time_range_start = parse_time(input("Enter start time (HH:MM): ").strip())
+            time_range_end = parse_time(input("Enter end time (HH:MM): ").strip())
+        elif search_type == '3':
+            date_range_start = parse_date(input("Enter start date (YYYY-MM-DD): ").strip())
+            date_range_end = parse_date(input("Enter end date (YYYY-MM-DD): ").strip())
+            time_range_start = parse_time(input("Enter start time (HH:MM): ").strip())
+            time_range_end = parse_time(input("Enter end time (HH:MM): ").strip())
+        else:
+            return "Invalid choice. Please enter 1, 2, or 3."
+
+        file_path, count = search_seismic_activity(folder_path, date_range_start, date_range_end, time_range_start, time_range_end)
+        return f"Search completed. {count} matching entries found. Results saved in: {file_path}"
+    
+    if "mag_size" in input_text.lower():
+        search_type = input("Enter the magnitude size or range (e.g., 1.5, >2, <=3.0): ").strip()
+        file_path, count = search_magnitude('user.atomfiles', search_type)
+        print(f"Magnitude search results saved to {file_path}")
+        return f"Magnitude search completed. Data saved in: {file_path}"
+
 
 
     # Add the user input to the conversation history (this will be used for context generation)
@@ -276,6 +449,59 @@ def generate_response(input_text):
             print(f"\nBIBA: Here are the locations found in the records:\n{locations_list}\n")
         else:
             print("\nBIBA: No locations found in the dataset.\n")
+
+    search_keywords = [
+    # English
+    "search earthquake data", "find events in", "lookup location", "earthquake report", "seismic activity in", 
+    "quake data for", "find seismic events", "earthquake history", "tremor records", "recent earthquakes near", 
+    "lookup seismic activity",
+    
+    # Spanish
+    "buscar datos de terremotos",  # search earthquake data
+    "encontrar eventos en",        # find events in
+    "buscar ubicación",            # lookup location
+    "informe de terremoto",        # earthquake report
+    "actividad sísmica en",        # seismic activity in
+    "datos de sismos para",        # quake data for
+    "encontrar eventos sísmicos",  # find seismic events
+    "historial de terremotos",     # earthquake history
+    "registros de temblores",      # tremor records
+    "terremotos recientes cerca de", # recent earthquakes near
+    "buscar actividad sísmica",    # lookup seismic activity
+
+    # French
+    "rechercher des données sur les tremblements de terre",  # search earthquake data
+    "trouver des événements à",   # find events in
+    "rechercher un emplacement",  # lookup location
+    "rapport sur le tremblement de terre",  # earthquake report
+    "activité sismique à",        # seismic activity in
+    "données sur les séismes pour",  # quake data for
+    "trouver des événements sismiques",  # find seismic events
+    "historique des tremblements de terre",  # earthquake history
+    "enregistrements de secousses",  # tremor records
+    "tremblements de terre récents près de",  # recent earthquakes near
+    "rechercher une activité sismique",  # lookup seismic activity
+
+    # Swahili
+    "tafuta data za tetemeko la ardhi",  # search earthquake data
+    "tafuta matukio katika",  # find events in
+    "angalia eneo",  # lookup location
+    "ripoti ya tetemeko la ardhi",  # earthquake report
+    "shughuli za seismic katika",  # seismic activity in
+    "data za tetemeko kwa",  # quake data for
+    "tafuta matukio ya seismic",  # find seismic events
+    "historia ya mitetemeko",  # earthquake history
+    "rekodi za mitetemeko",  # tremor records
+    "mitetemeko ya hivi karibuni karibu na",  # recent earthquakes near
+    "tafuta shughuli za seismic"  # lookup seismic activity
+]
+
+    if any(keyword in input_text.lower() for keyword in search_keywords):
+        search_place = input("Enter the place (city) to search for: ").strip()
+        file_path, count = search_atom_files('user.atomfiles', search_place)
+        return f"Search results saved to {file_path}. Number of matching entries: {count}"
+
+
 
     # Generate a response with the following parameters:
     outputs = model.generate(
