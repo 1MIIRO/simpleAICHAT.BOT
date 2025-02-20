@@ -9,7 +9,10 @@ import os
 from collections import Counter
 import re
 import dateutil.parser
-
+import statistics
+import folium
+from folium.plugins import MarkerCluster
+from datetime import datetime, timedelta
 
 # Load pre-trained DialoGPT model and tokenizer
 tokenizer = AutoTokenizer.from_pretrained("microsoft/DialoGPT-medium")
@@ -156,9 +159,9 @@ def parse_time(time_str):
         return None
 
 def search_seismic_activity(folder_path, date_range_start, date_range_end, time_range_start, time_range_end):
-    namespace = {'atom': 'http://www.w3.org/2005/Atom', 'georss': 'http://www.georss.org/georss'}
+    namespace = {'atom': 'http://www.w3.org/2005/Atom', 'georss': 'http://www.georss.org/georss', 'ns0' : 'http://www.georss.org/georss'}
     matching_entries = []
-    result_file_path = 'displayfiles/display_search_results.txt'
+    result_file_path = 'displayfiles//display_search_results.txt'
 
     with open(result_file_path, 'w', encoding='utf-8') as result_file:
         for filename in os.listdir(folder_path):
@@ -226,8 +229,14 @@ def get_event_data(entry, namespace):
     title = entry.find('atom:title', namespace).text
     link = entry.find('atom:link', namespace).get('href')
     published = entry.find('atom:updated', namespace).text
-    coordinates = entry.find('georss:point', namespace).text
-    elevation = entry.find('georss:elev', namespace).text
+    coordinates = entry.find('ns0:point', namespace).text
+    elev_text = entry.find('{http://www.georss.org/georss}elev').text
+    elev = 0.0  # Default value if elevation is missing or None
+    if elev_text is not None:
+            try:
+                elev = float(elev_text)
+            except ValueError:
+                elev = 0.0  # Default value if conversion fails 
 
     location_parts = title.split(' - ')
     if len(location_parts) > 1:
@@ -245,26 +254,216 @@ def get_event_data(entry, namespace):
     if match:
         magnitude = float(match.group(1))  
 
+    # Extract age (optional) from the event entry
     age = None
     for category in entry.findall('atom:category', namespace):
         if category.get('label') == 'Age':
             age = category.get('term')
+
+    # Extract time, month, year, and other details
+    timestamp = datetime.fromisoformat(published)
+    time = timestamp.strftime('%H')  # Extract hour as a string
+    month = timestamp.month
+    year = timestamp.year
+    
+    # Prepare the event data dictionary
     event_data = {
         'title': title,
         'link': link,
         'published': published,
         'coordinates': coordinates,
-        'elevation': elevation,
+        'elevation': float(elev),  # Ensure elevation is a float
         'age': age,
         'magnitude': magnitude,
         'city': city,
-        'place': place
+        'place': place,
+        'time': time,
+        'month': month,
+        'year': year,
+        'timestamp': published  # Store the timestamp for time difference calculations
     }
 
     return event_data
 
+def calculate_statistics(folder_path ):
+    namespace = {'atom': 'http://www.w3.org/2005/Atom', 'georss': 'http://www.georss.org/georss' , 'ns0':"http://www.georss.org/georss"}
+    entries = []
+    places = []
+    times = []
+    months = []
+    years = []
+    elevations = []
+    magnitudes = []
+    timestamps = []  # Store timestamps to calculate time differences
 
+    # Loop through all files in the folder
+    for filename in os.listdir(folder_path):
+        if filename.endswith('.atom'):
+            file_path = os.path.join(folder_path, filename)
+            root = parse_atom_file(file_path)
+            
+            # Loop through the entries and get the data from get_event_data
+            for entry in root.findall('atom:entry', namespace):
+                event_data = get_event_data(entry, namespace)
+
+                # Append the relevant data
+                entries.append(event_data['title'])
+                places.append(event_data['place'])
+                times.append(event_data['time'])
+                months.append(event_data['month'])
+                years.append(event_data['year'])
+                elevations.append(event_data['elevation'])
+                magnitudes.append(event_data['magnitude'])
+                timestamps.append(event_data['timestamp'])
+
+    total_entries = len(entries)
+
+    # Most and least frequent places
+    place_counts = Counter(places)
+    most_frequent_place = place_counts.most_common(1)[0][0]
+    least_frequent_place = place_counts.most_common()[-1][0]
+
+    # Average time (HH)
+    total_hours = sum(int(time) for time in times)
+    average_time = total_hours / total_entries if total_entries else 0
+
+    # Most frequent month and year
+    month_counts = Counter(months)
+    most_frequent_month = month_counts.most_common(1)[0][0]
+
+    year_counts = Counter(years)
+    most_frequent_year = year_counts.most_common(1)[0][0]
+
+    # Percentage of entries before and after noon
+    before_noon = sum(1 for time in times if 1 <= int(time) <= 12)
+    after_noon = total_entries - before_noon
+    percentage_before_noon = (before_noon / total_entries) * 100 if total_entries else 0
+    percentage_after_noon = (after_noon / total_entries) * 100 if total_entries else 0
+
+    # Highest and lowest elevation
+    highest_elevation_index = elevations.index(max(elevations))
+    lowest_elevation_index = elevations.index(min(elevations))
+    highest_elevation_title = entries[highest_elevation_index]
+    lowest_elevation_title = entries[lowest_elevation_index]
+
+    # Percentage of negative and positive elevations
+    negative_elevations = sum(1 for elev in elevations if elev < 0)
+    positive_elevations = total_entries - negative_elevations
+    percentage_negative_elevations = (negative_elevations / total_entries) * 100 if total_entries else 0
+    percentage_positive_elevations = (positive_elevations / total_entries) * 100 if total_entries else 0
     
+    magnitudes = [m for m in magnitudes if m is not None]
+
+    # Average magnitude
+    average_magnitude = sum(magnitudes) / total_entries if total_entries and magnitudes else 0
+
+    # Median Magnitude
+    median_magnitude = statistics.median(magnitudes) if magnitudes else 0
+
+    # Standard Deviation of Magnitudes
+    stdev_magnitude = statistics.stdev(magnitudes) if len(magnitudes) > 1 else 0
+
+    # Median Elevation
+    median_elevation = statistics.median(elevations) if elevations else 0
+
+    # Standard Deviation of Elevations
+    stdev_elevation = statistics.stdev(elevations) if len(elevations) > 1 else 0
+
+    # Longest Time Between Earthquakes
+    timestamp_diffs = []
+    for i in range(1, len(timestamps)):
+        time_diff = (datetime.fromisoformat(timestamps[i]) - datetime.fromisoformat(timestamps[i-1])).total_seconds() / 3600
+        timestamp_diffs.append(time_diff)
+    longest_time_between = max(timestamp_diffs) if timestamp_diffs else 0
+    shortest_time_between = min(timestamp_diffs) if timestamp_diffs else 0
+    average_time_between = sum(timestamp_diffs) / len(timestamp_diffs) if timestamp_diffs else 0
+    
+
+
+    # Total Magnitude of All Earthquakes
+    total_magnitude = sum(magnitudes)
+
+    # Number of Earthquakes with Magnitude >= 5
+    num_magnitudes_ge5 = sum(1 for mag in magnitudes if mag >= 5)
+
+    # Number of Earthquakes with Magnitude < 3
+    num_magnitudes_lt3 = sum(1 for mag in magnitudes if mag < 3)
+
+    # Total Elevation Above Sea Level
+    total_positive_elevation = sum(elev for elev in elevations if elev > 0)
+
+    # Total Elevation Below Sea Level
+    total_negative_elevation = sum(elev for elev in elevations if elev < 0)
+
+    # Percentage of Earthquakes with Magnitude >= 6
+    percentage_ge6_magnitude = (sum(1 for mag in magnitudes if mag >= 6) / total_entries) * 100 if total_entries else 0
+
+    earthquake_by_week = Counter([datetime.fromisoformat(timestamp).strftime('%Y-%U') for timestamp in timestamps])  # Week number
+    earthquake_by_month = Counter([datetime.fromisoformat(timestamp).strftime('%Y-%m') for timestamp in timestamps])
+    earthquake_by_year = Counter([datetime.fromisoformat(timestamp).strftime('%Y') for timestamp in timestamps])
+
+    # Write the statistics to a text file
+    with open("displayfiles//user_view_screen.txt", "w", encoding="utf-8") as file:
+        file.write("===============================================================\n")
+        file.write("Earthquake statistics report\n")
+        file.write("===============================================================\n")
+        file.write(f"Total number of earthquakes\n{total_entries}\n")
+        file.write("----------------------------------------------------------------\n")
+        file.write(f"Place that experienced the most earthquakes\n{most_frequent_place}\n")
+        file.write("----------------------------------------------------------------\n")
+        file.write(f"Place that experienced the least earthquakes\n{least_frequent_place}\n")
+        file.write("----------------------------------------------------------------\n")
+        file.write(f"Average time the earthquakes were recorded\n{average_time} hours\n")
+        file.write("----------------------------------------------------------------\n")
+        file.write(f"The Month that is recorded the most earthquakes\n{most_frequent_month}\n")
+        file.write("----------------------------------------------------------------\n")
+        file.write(f"The YEAR that is recorded the most earthquakes\n{most_frequent_year}\n")
+        file.write("----------------------------------------------------------------\n")
+        file.write(f"Percentage of the earthquakes that took place before noon\n{percentage_before_noon}%\n")
+        file.write("----------------------------------------------------------------\n")
+        file.write(f"Percentage of the earthquakes that took place after noon\n{percentage_after_noon}%\n")
+        file.write("----------------------------------------------------------------\n")
+        file.write(f"Location of earthquake recorded with the highest altitude\n{highest_elevation_title}\n")
+        file.write("----------------------------------------------------------------\n")
+        file.write(f"Percentage of the earthquakes that took place below sea level\n{percentage_negative_elevations}%\n")
+        file.write("----------------------------------------------------------------\n")
+        file.write(f"Percentage of earthquakes that took place above sea level\n{percentage_positive_elevations}%\n")
+        file.write("----------------------------------------------------------------\n")
+        file.write(f"Location of earthquake recorded with the lowest altitude\n{lowest_elevation_title}\n")
+        file.write("----------------------------------------------------------------\n")
+        file.write(f"Average magnitude of the earthquakes experienced\n{average_magnitude}\n")
+        file.write("----------------------------------------------------------------\n")
+        file.write(f"Median Magnitude\n{median_magnitude}\n")
+        file.write("----------------------------------------------------------------\n")
+        file.write(f"Standard Deviation of Magnitudes\n{stdev_magnitude}\n")
+        file.write("----------------------------------------------------------------\n")
+        file.write(f"Median Elevation\n{median_elevation}\n")
+        file.write("----------------------------------------------------------------\n")
+        file.write(f"Standard Deviation of Elevations\n{stdev_elevation}\n")
+        file.write("----------------------------------------------------------------\n")
+        file.write(f"Longest time between earthquakes\n{longest_time_between} hours\n")
+        file.write("----------------------------------------------------------------\n")
+        file.write(f"Shortest time between earthquakes\n{shortest_time_between} hours\n")
+        file.write("----------------------------------------------------------------\n")
+        file.write(f"Average duration between earthquakes\n{average_time_between} hours\n")
+        file.write("----------------------------------------------------------------\n")
+        file.write(f"Total Magnitude of All Earthquakes\n{total_magnitude}\n")
+        file.write("----------------------------------------------------------------\n")
+        file.write(f"Number of Earthquakes with Magnitude >= 5\n{num_magnitudes_ge5}\n")
+        file.write("----------------------------------------------------------------\n")
+        file.write(f"Number of Earthquakes with Magnitude < 3\n{num_magnitudes_lt3}\n")
+        file.write("----------------------------------------------------------------\n")
+        file.write(f"Total Elevation Above Sea Level\n{total_positive_elevation} meters\n")
+        file.write("----------------------------------------------------------------\n")
+        file.write(f"Total Elevation Below Sea Level\n{total_negative_elevation} meters\n")
+        file.write("----------------------------------------------------------------\n")
+        file.write(f"Percentage of Earthquakes with Magnitude >= 6\n{percentage_ge6_magnitude}%\n")
+        file.write("----------------------------------------------------------------\n")
+        file.write(f"Frequency by Week\n{dict(earthquake_by_week)}\n")
+        file.write(f"Frequency by Month\n{dict(earthquake_by_month)}\n")
+        file.write(f"Frequency by Year\n{dict(earthquake_by_year)}\n")
+        file.write("----------------------------------------------------------------\n")
+  
 # Function to check magnitude
 def check_magnitude(magnitude, search_type):
     try:
@@ -284,7 +483,7 @@ def check_magnitude(magnitude, search_type):
         return False
 
 def search_magnitude(folder_path, search_type):
-    namespace = {'atom': 'http://www.w3.org/2005/Atom', 'georss': 'http://www.georss.org/georss'}
+    namespace = {'atom': 'http://www.w3.org/2005/Atom', 'georss': 'http://www.georss.org/georss', 'ns0' : 'http://www.georss.org/georss'}
     matching_entries = []
     result_file_path = 'displayfiles//display_search_results.txt'
 
@@ -313,7 +512,7 @@ def search_magnitude(folder_path, search_type):
     return result_file_path, len(matching_entries)    
 
 def search_atom_files(folder_path, search_place):
-    namespace = {'atom': 'http://www.w3.org/2005/Atom', 'georss': 'http://www.georss.org/georss'}
+    namespace = {'atom': 'http://www.w3.org/2005/Atom', 'georss': 'http://www.georss.org/georss', 'ns0' : 'http://www.georss.org/georss'}
     matching_entries = []
     result_file_path = 'displayfiles/display_search_results.txt'
 
@@ -342,10 +541,167 @@ def search_atom_files(folder_path, search_place):
     # Ensure the function always returns a tuple
     return result_file_path, len(matching_entries)
 
+def parse_atom_files_by_place_and_date(folder_path, start_date, end_date, place):
+    entries = []
+    for filename in os.listdir(folder_path):
+        if filename.endswith(".atom"):
+            file_path = os.path.join(folder_path, filename)
+            tree = ET.parse(file_path)
+            root = tree.getroot()
+            
+            for entry in root.findall("{http://www.w3.org/2005/Atom}entry"):
+                title = entry.find("{http://www.w3.org/2005/Atom}title").text
+                updated = entry.find("{http://www.w3.org/2005/Atom}updated").text
+                point = entry.find("{http://www.georss.org/georss}point").text if entry.find("{http://www.georss.org/georss}point") is not None else None
+                
+                if title and updated and point:
+                    title_parts = title.split()
+                    location_in_title = title_parts[-1]  
+                
+                    if location_in_title.lower() == place.lower():
+                        date = datetime.strptime(updated.split('T')[0], '%Y-%m-%d')
+                        if start_date <= date <= end_date:
+                            magnitude = None
+                            match = re.search(r'M\s([-]?[\d\.]+)', title)  
+                            if match:
+                                try:
+                                    magnitude = float(match.group(1))  
+                                except ValueError as e:
+                                    print(f"Error converting magnitude for {title}: {e}")
+                                    continue
+                            else:
+                                print(f"No magnitude found in title for {title}")
+                                continue
+                            
+                            entries.append((date, point, magnitude))  
+    return entries
 
+def get_marker_color(magnitude):
+    if magnitude >= 5:
+        return 'red'
+    elif 3 <= magnitude < 5:
+        return 'orange'
+    elif 1.5 <= magnitude < 3:
+        return 'purple'
+    elif magnitude < 1.5:
+        return 'green'
+    else:
+        return 'blue'
+
+def plot_on_map(entries):
+    m = folium.Map(location=[0, 0], zoom_start=2)
+    
+    marker_cluster = MarkerCluster().add_to(m)
+    
+    for date, point, magnitude in entries:
+        lat, lon = map(float, point.split())
+        marker_color = get_marker_color(magnitude)  
+        
+        folium.Marker(
+            location=[lat, lon],
+            popup=f"{date}<br>Magnitude: {magnitude}<br>Latitude: {lat}, Longitude: {lon}",
+            icon=folium.Icon(color=marker_color, icon_size=(40, 40)) 
+        ).add_to(marker_cluster)
+    
+    return m
+
+def get_single_date(user_input):
+    try:
+        if user_input.lower() == "all":  # If the input is "all", select all available data
+            # Use a very broad date range that encompasses all possible dates
+            start_date = datetime(1900, 1, 1)  # Set a start date far in the past
+            end_date = datetime.now()  # Set the end date as today
+            return start_date, end_date
+        elif len(user_input) == 7:  # If the input is in the format YYYY-MM (month precision)
+            start_date = datetime.strptime(f"{user_input}-01", "%Y-%m-%d")
+            end_date = (start_date.replace(day=28) + timedelta(days=4)) - timedelta(days=start_date.replace(day=28).day)
+            return start_date, end_date
+        elif len(user_input) == 4:  # If only year is entered (YYYY)
+            start_date = datetime.strptime(f"{user_input}-01-01", "%Y-%m-%d")
+            end_date = datetime.strptime(f"{user_input}-12-31", "%Y-%m-%d")
+            return start_date, end_date
+    except Exception as e:
+        print(f"Error parsing date: {e}")
+        return None, None
+
+def get_date_range(start_date_input, end_date_input):
+    try:
+        start_date = datetime.strptime(start_date_input, "%Y-%m-%d")
+        end_date = datetime.strptime(end_date_input, "%Y-%m-%d")
+        
+        if start_date > end_date:
+            print("Error: Start date cannot be later than the end date.")
+            return None, None
+        return start_date, end_date
+    except Exception as e:
+        print(f"Error parsing date range: {e}")
+        return None, None
+
+def show_help():
+    help_text = """
+       'translate' : This phrase is added at every sentence to get the french , spanish and swahili translation
+      
+        'translate'  : Cette phrase est ajoutée à chaque phrase pour obtenir la traduction en français, espagnol et swahili.  
+      
+        'translate' : Esta frase se añade a cada oración para obtener la traducción al francés, español y suajili.
+       
+       'translate' : Hii kifungu imeongezwa kwenye kila sentensi kupata tafsiri ya Kifaransa, Kihispania na Kiswahili.
+       
+        'date' :  You can always ask me for the date 
+         
+        'date' :  Tu peux toujours me demander la date
+        
+        'fecha':   Siempre puedes pedirme la fecha
+        
+        'tarehe':  Unaweza kila wakati kuniuliza tarehe
+
+        'time' :   anytime you need the current time in your timezone you can always ask me 
+
+        temps : Chaque fois que tu as besoin de l'heure actuelle dans ton fuseau horaire, tu peux toujours me demander.
+
+        tiempo: Siempre que necesites la hora actual en tu zona horaria, siempre puedes pedírmelo.
+
+        wakati:  Wakati wowote unapotaka saa ya sasa katika eneo lako la muda, unaweza kila wakati kuniuliza.
+
+        'earthquake_report_data': This command prompts me to give you statistics on siesmic activity from 2005 -2025
+
+        'earthquake_report_data':  Cette commande me demande de vous donner des statistiques sur l'activité sismique de 2005 à 2025.
+
+        'earthquake_report_data':  Este comando me pide que te dé estadísticas sobre la actividad sísmica de 2005 a 2025.
+
+        'earthquake_report_data':   Amri hii inanilazimisha kutoa takwimu za shughuli za kutikisa ardhi kuanzia 2005 hadi 2025.
+   
+        you can always ask me if you need to view siesmic activity over a period of time between 2005 and 2025 
+
+        Tu peux toujours me demander si tu as besoin de voir l'activité sismique sur une période de temps entre 2005 et 2025.
+   
+        Siempre puedes pedirme si necesitas ver la actividad sísmica durante un período de tiempo entre 2005 y 2025.
+
+        Unaweza kila wakati kuniuliza ikiwa unahitaji kuona shughuli za kutikisa ardhi katika kipindi cha muda kati ya 2005 na 2025.
+        
+        'mag_size' : this command allows you to see all seismic activity of a magnitude of your choosing 
+
+        'mag_size' : Cette commande vous permet de voir toute l'activité sismique d'une magnitude de votre choix.
+
+        'mag_size' : Este comando te permite ver toda la actividad sísmica de una magnitud de tu elección.
+
+        'mag_size' : Amri hii inakuwezesha kuona shughuli zote za kutikisa ardhi za ukubwa wa uchaguzi wako
+
+        'map_view' : View hotspots on the map in your web browser 
+
+        'map_view' : Afficher les points chauds sur la carte dans votre navigateur web.
+
+        'map_view' : Ver los puntos calientes en el mapa en tu navegador web.
+
+        'map_view' :Tazama maeneo ya moto kwenye ramani katika kivinjari chako cha mtandao.
+    """
+    return help_text
 
 # Function to generate a response based on the input
 def generate_response(input_text):
+    
+    if input_text.lower() == "help":
+        return show_help()
 
     # Check if the sentence ends with "Translate" and translate
     if input_text.lower().endswith(" translate"):
@@ -353,7 +709,7 @@ def generate_response(input_text):
         return translate_text(text_to_translate)  # Call translate_text function to handle translation
     
     # Check if the input asks for the date or time in English, French, Spanish, or Swahili
-    if any(phrase in input_text.lower() for phrase in ["date", "jour", "día", "date", "muda", "siku"]):
+    if any(phrase in input_text.lower() for phrase in ["date", "jour", "día", "muda", "siku"]):
         return get_current_date()
 
     if any(phrase in input_text.lower() for phrase in ["time", "heure", "hora", "wakati"]):
@@ -361,6 +717,11 @@ def generate_response(input_text):
     
     # Check if the input is in the predefined responses dictionary (case insensitive)
     user_input_lower = input_text.lower()  # Convert input to lowercase
+    
+    if "earthquake_report_data" in input_text.lower():
+        # Assuming you need to get the namespace from the XML or relevant data
+        calculate_statistics('user.atomfiles')  # Pass the folder path and namespace to calculate_statistics
+        return "Earthquake statistics report has been generated. Check the 'displayfiles/user_view_screen.txt' file for details."
     
     if user_input_lower in predefined_responses:
         return predefined_responses[user_input_lower]
@@ -501,7 +862,32 @@ def generate_response(input_text):
         file_path, count = search_atom_files('user.atomfiles', search_place)
         return f"Search results saved to {file_path}. Number of matching entries: {count}"
 
-
+    if input_text.lower() == "map_view":
+        choice = input("Enter 'single' for a single date or 'range' for a date range: ").lower()
+        
+        if choice == 'single':
+            user_input_date = input("Enter the date (YYYY, YYYY-MM, or 'all' for all data): ")
+            start_date, end_date = get_single_date(user_input_date)
+        elif choice == 'range':
+            start_date_input = input("Enter the start date (YYYY-MM-DD): ")
+            end_date_input = input("Enter the end date (YYYY-MM-DD): ")
+            start_date, end_date = get_date_range(start_date_input, end_date_input)
+        else:
+            return "Invalid choice. Please enter 'single' or 'range'."
+        
+        if start_date and end_date:
+            user_place = input("Enter the place (e.g., California): ")
+            entries = parse_atom_files_by_place_and_date("user.atomfiles", start_date, end_date, user_place)
+            if entries:
+                map_obj = plot_on_map(entries)
+                map_file = "earthquake_map.html"
+                map_obj.save(map_file)
+                return f"Map has been saved. Open the following link to view it: file://{os.path.abspath(map_file)}"
+            else:
+                return f"No entries found for '{user_place}' within {start_date} to {end_date}."
+        else:
+            return "Invalid date range input."
+   
 
     # Generate a response with the following parameters:
     outputs = model.generate(
@@ -525,9 +911,6 @@ def generate_response(input_text):
     
     return response.strip()
 
-# Function to handle earthquake data
-
-
 # Function to translate the input text into Spanish, French, and Swahili using deep-translator
 def translate_text_deep_translator(text):
     translations = {}
@@ -540,23 +923,13 @@ def translate_text_deep_translator(text):
     return result
 
 # Function to translate the input text into Spanish, French, and Swahili using googletrans
-def translate_text_googletrans(text):
-    translator = GoogleTranslatorV2()
-    translations = {}
-    translations['Spanish'] = translator.translate(text, src='en', dest='es').text
-    translations['French'] = translator.translate(text, src='en', dest='fr').text
-    translations['Swahili'] = translator.translate(text, src='en', dest='sw').text
-
-    # Format the translations
-    result = f"Spanish: {translations['Spanish']}\nFrench: {translations['French']}\nSwahili: {translations['Swahili']}"
-    return result
 
 # Function to switch between translators (deep-translator or googletrans)
 def translate_text(text):
     # Randomly choose whether to use deep-translator or googletrans
     import random
     if random.choice([True, False]):
-        return translate_text_googletrans(text)
+        return translate_text_deep_translator(text)
     else:
         return translate_text_deep_translator(text)
 
