@@ -13,6 +13,10 @@ import statistics
 import folium
 from folium.plugins import MarkerCluster
 from datetime import datetime, timedelta
+from retry_requests import retry
+import pandas as pd
+import folium
+from folium import IFrame
 
 # Load pre-trained DialoGPT model and tokenizer
 tokenizer = AutoTokenizer.from_pretrained("microsoft/DialoGPT-medium")
@@ -75,6 +79,7 @@ predefined_responses = {
     "vipi": "Niko vizuri! Na wewe vipi?",  # I'm good! How about you?
     "jina lako nani": "Mimi ni AI iliyoumbwa kuzungumza nawe! Jina langu ni BIBA.",  # I am an AI created to chat with you! My name is BIBA.
 }
+
 search_triggers = [
     # English
     "search location details",  
@@ -109,12 +114,37 @@ search_triggers = [
     "kuna matukio katika"  # Check if any events occurred in a place
 ]
 
-# Function to extract unique locations from .atom files
+state_abbreviations = {
+    'AK': 'Alaska', 'AR': 'Arkansas', 'AZ': 'Arizona', 'CA': 'California', 
+    'CO': 'Colorado', 'HI': 'Hawaii', 'NC': 'North Carolina', 'NJ': 'New Jersey', 
+    'NM': 'New Mexico', 'NV': 'Nevada', 'NY': 'New York', 'OK': 'Oklahoma', 
+    'OR': 'Oregon', 'PA': 'Pennsylvania', 'KS': 'Kansas', 'WA': 'Washington', 
+    'WY': 'Wyoming', 'TX': 'Texas', 'TN': 'Tennessee'
+} 
+
+def extract_location_from_title(title):
+    """Extracts the city and place from the title."""
+    location_parts = title.split(' - ')
+    
+    if len(location_parts) > 1:
+        # Split by ' of ' to focus on the city and place
+        city_place_part = location_parts[-1].split(' of ')
+        
+        if len(city_place_part) == 2:
+            # Now split by ', ' to get city and place
+            city_place = city_place_part[1].split(', ')
+            if len(city_place) == 2:
+                city = city_place[0].strip()  # City
+                place = city_place[1].strip()  # Place (State)
+                return f"{city} {place}"
+    
+    return None
+
 def extract_all_locations(folder_path):
     """Extracts unique locations (places) from all .atom files in the folder."""
     global unique_locations
     unique_locations = set()
-    namespace = {'atom': 'http://www.w3.org/2005/Atom'}
+    namespace = {'atom': 'http://www.w3.org/2005/Atom', 'georss': 'http://www.georss.org/georss', 'ns0':"http://www.georss.org/georss"}
     
     for filename in os.listdir(folder_path):
         if filename.endswith('.atom'):
@@ -125,18 +155,23 @@ def extract_all_locations(folder_path):
 
                 for entry in root.findall('atom:entry', namespace):
                     title = entry.find('atom:title', namespace).text
-                    location_parts = title.split(' - ')
-
-                    if len(location_parts) > 1:
-                        city_place = location_parts[-1].split(', ')
-                        if len(city_place) == 2:
-                            unique_locations.add(city_place[1].strip())
+                    location = extract_location_from_title(title)
+                    if location:
+                        unique_locations.add(location)
 
             except ET.ParseError:
-                print(f"Error parsing file: {file_path}")    
+                print(f"Error parsing file: {file_path}")
+
+def show_locations():
+    """Displays extracted locations."""
+    if unique_locations:
+        return "\n".join(sorted(unique_locations))
+    else:
+        return "No locations found in dataset."
 
 # Function to search for event data in .atom files
 def parse_atom_file(file_path):
+
     try:
         tree = ET.parse(file_path)
         root = tree.getroot()
@@ -144,6 +179,7 @@ def parse_atom_file(file_path):
     except ET.ParseError as e:
         print(f"Error parsing file {file_path}: {e}")
         return None
+
 # Function to parse date
 def parse_date(date_str):
     try:
@@ -230,24 +266,33 @@ def get_event_data(entry, namespace):
     link = entry.find('atom:link', namespace).get('href')
     published = entry.find('atom:updated', namespace).text
     coordinates = entry.find('ns0:point', namespace).text
-    elev_text = entry.find('{http://www.georss.org/georss}elev').text
+    elev_text = entry.find('ns0:elev' ,namespace).text
     elev = 0.0  # Default value if elevation is missing or None
     if elev_text is not None:
             try:
                 elev = float(elev_text)
             except ValueError:
                 elev = 0.0  # Default value if conversion fails 
-
-    location_parts = title.split(' - ')
-    if len(location_parts) > 1:
-        city_place = location_parts[-1].split(', ')
+     # Extract title (assuming title contains the location)
+     
+    location = extract_location_from_title(title) 
+    if location:
+        # The extract_location_from_title should return the city and place in the correct format
+        city_place = location.split(' ')  # Split by space since both city and place are expected to be in the same string
+        
+        # If there are two parts (city and place), assign them accordingly
         if len(city_place) == 2:
-            city = city_place[0] 
-            place = city_place[1]  
+            city, place = city_place[0], city_place[1]
         else:
-            city, place = '', ''  
-    else:
-        city, place = '', ''
+            city, place = '', city_place[0]  # If only the place is found, set it as place
+        
+    if place and place.upper() in state_abbreviations:
+        place = state_abbreviations[place.upper()]  # If place is a state abbreviation, expand it to full name
+
+    # If there's no city, return only the place (could be a state or a known place)
+    if not city:
+        city = place 
+
 
     magnitude = None
     match = re.search(r'M\s*([\d.]+)', title)
@@ -265,6 +310,9 @@ def get_event_data(entry, namespace):
     time = timestamp.strftime('%H')  # Extract hour as a string
     month = timestamp.month
     year = timestamp.year
+    date = timestamp.day
+    date_obj = datetime.fromisoformat(published)
+    formatted_date = date_obj.strftime('%Y-%m-%d')
     
     # Prepare the event data dictionary
     event_data = {
@@ -280,10 +328,199 @@ def get_event_data(entry, namespace):
         'time': time,
         'month': month,
         'year': year,
-        'timestamp': published  # Store the timestamp for time difference calculations
+        'timestamp': published ,
+        'date':date,# Store the timestamp for time difference calculations
+        'formatted_date': formatted_date
     }
 
     return event_data
+
+def get_weather_data(entry, namespace):
+    location = entry.find('{http://www.w3.org/2005/Atom}location').text
+    lat, lon = map(float, location.split()) 
+    time_text = entry.find('{http://www.w3.org/2005/Atom}time').text
+    timestamp = datetime.fromisoformat(time_text[:-6])  
+    formatted_time = timestamp.strftime('%Y-%m-%d %H:%M:%S') 
+    formatted_date = timestamp.strftime('%Y-%m-%d')
+    weather_element = entry.find('{http://www.w3.org/2005/Atom}weather')
+    
+    weather_code = float(weather_element.find('{http://www.w3.org/2005/Atom}weather_code').text)
+    temperature_max = float(weather_element.find('{http://www.w3.org/2005/Atom}temperature_2m_max').text)
+    temperature_min = float(weather_element.find('{http://www.w3.org/2005/Atom}temperature_2m_min').text)
+    temperature_mean = float(weather_element.find('{http://www.w3.org/2005/Atom}temperature_2m_mean').text)
+    sunshine_duration = float(weather_element.find('{http://www.w3.org/2005/Atom}sunshine_duration').text)
+    rain_sum = float(weather_element.find('{http://www.w3.org/2005/Atom}rain_sum').text)
+    snowfall_sum = float(weather_element.find('{http://www.w3.org/2005/Atom}snowfall_sum').text)
+    precipitation_hours = float(weather_element.find('{http://www.w3.org/2005/Atom}precipitation_hours').text)
+    wind_speed_max = float(weather_element.find('{http://www.w3.org/2005/Atom}wind_speed_10m_max').text)
+    
+    weather_data = {
+        'location': (lat, lon), 
+        'time': formatted_time, 
+        'formatted_date': formatted_date, 
+        'weather_code': weather_code,
+        'temperature_max': temperature_max,
+        'temperature_min': temperature_min,
+        'temperature_mean': temperature_mean,
+        'sunshine_duration': sunshine_duration,
+        'rain_sum': rain_sum,
+        'snowfall_sum': snowfall_sum,
+        'precipitation_hours': precipitation_hours,
+        'wind_speed_max': wind_speed_max,
+    }
+
+    return weather_data
+
+
+
+def get_entries_from_files(folder_path, start_date, end_date):
+    entries = []
+    
+    # Loop through all XML files in the folder
+    for filename in os.listdir(folder_path):
+        if filename.endswith('.xml'):
+            file_path = os.path.join(folder_path, filename)
+            
+            # Parse the XML file
+            root = parse_atom_file(file_path)
+            if root is not None:
+                # Find all the entries in the file
+                for entry in root.findall('{http://www.w3.org/2005/Atom}entry'):
+                    weather_data = get_weather_data(entry, '{http://www.w3.org/2005/Atom}')
+                    entry_date_str = weather_data['formatted_date']
+                    
+                    # Convert the entry date string to a datetime object
+                    try:
+                        entry_date = datetime.strptime(entry_date_str, "%Y-%m-%d")  # Assuming the date is in YYYY-MM-DD format
+                    except ValueError:
+                        continue  # If the date format is invalid, skip this entry
+                    
+                    # Check if the entry's date is within the specified range
+                    if start_date <= entry_date <= end_date:
+                        entries.append(weather_data)
+
+    return entries
+
+
+# Function to generate a weather icon URL based on the weather code
+def get_weather_icon_url(icon_code):
+    return f"http://openweathermap.org/img/wn/{icon_code}@2x.png"
+
+# Function to create a popup HTML table for weather data
+def get_weather_icon_url(icon_code):
+    return f"http://openweathermap.org/img/wn/{icon_code}@2x.png"
+
+# Function to display entries on the map with popup
+def display_entries_on_map(entries):
+    # Create a folium map centered at an approximate global location
+    m = folium.Map(location=[0, 0], zoom_start=2)
+
+    # Loop through the entries and add markers to the map
+    for entry in entries:
+        lat, lon = entry['location']  # Extract latitude and longitude from entry
+        
+        # Extract weather data for popup content
+        rain_sum = entry['rain_sum']
+        wind_speed = entry['wind_speed_max']
+        sunshine_duration = entry['sunshine_duration']
+        snowfall_sum = entry['snowfall_sum']
+        temp_max = entry['temperature_max']
+        temp_min = entry['temperature_min']
+        temp_mean = entry['temperature_mean']
+        icon_code = entry['weather_code']
+        time = entry['time']
+        
+        # Get the weather icon URL based on the weather code
+        weather_icon_url = get_weather_icon_url(icon_code)
+
+        # Create the HTML content for the popup with weather icons included
+        popup_content = f"""
+        <table border="1" cellpadding="5" cellspacing="0">
+            <tr><td colspan="2"><strong>Weather Data</strong></td></tr>
+            <tr><td>Weather Icon</td><td><img src="{weather_icon_url}" alt="Weather Icon" width="40" height="40"></td></tr>
+            <tr><td>Rainfall Sum</td><td>{rain_sum} mm</td></tr>
+            <tr><td>Rain Icon</td><td><img src="{get_weather_icon_url('10d')}" alt="Rain" width="40" height="40"></td></tr>
+            <tr><td>Wind Speed</td><td>{wind_speed} km/h</td></tr>
+            <tr><td>Wind Icon</td><td><img src="{get_weather_icon_url('50d')}" alt="Wind" width="40" height="40"></td></tr>
+            <tr><td>Snowfall</td><td>{snowfall_sum} mm</td></tr>
+            <tr><td>Snow Icon</td><td><img src="{get_weather_icon_url('13d')}" alt="Snow" width="40" height="40"></td></tr>
+            <tr><td>Sunshine Duration</td><td>{sunshine_duration} hours</td></tr>
+            <tr><td>Sunshine Icon</td><td><img src="https://img.icons8.com/ios-filled/50/000000/sun.png" alt="Sunshine" width="40" height="40"></td></tr>
+            <tr><td>Max Temperature</td><td>{temp_max}°C</td></tr>
+            <tr><td>Min Temperature</td><td>{temp_min}°C</td></tr>
+            <tr><td>Avg Temperature</td><td>{temp_mean}°C</td></tr>
+            <tr><td>Temperature Icon</td><td><img src="https://img.icons8.com/ios-filled/50/000000/temperature.png" alt="Temperature" width="40" height="40"></td></tr>
+            <tr><td>Time</td><td>{time}</td></tr>
+        </table>
+        """
+
+        # Create the marker and add it to the map with the popup content
+        folium.Marker(
+            location=[lat, lon],  # Marker at latitude and longitude
+            popup=folium.Popup(popup_content, max_width=300),  # Popup with weather data table
+            icon=folium.Icon(color='blue')  # Blue marker icon
+        ).add_to(m)
+
+    # Save the map to an HTML file
+    m.save("weather_map_with_icons.html")
+    return m
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 def calculate_statistics(folder_path ):
     namespace = {'atom': 'http://www.w3.org/2005/Atom', 'georss': 'http://www.georss.org/georss' , 'ns0':"http://www.georss.org/georss"}
@@ -700,8 +937,53 @@ def show_help():
 # Function to generate a response based on the input
 def generate_response(input_text):
     
+    user_input_lower = input_text.lower()
+
+
     if input_text.lower() == "help":
         return show_help()
+    
+    if input_text.lower() == "history":
+        # Request the start and end dates
+        start_date_input = input("Enter the start date (YYYY-MM-DD): ")
+        end_date_input = input("Enter the end date (YYYY-MM-DD): ")
+
+        try:
+            start_date = datetime.strptime(start_date_input, "%Y-%m-%d")
+            end_date = datetime.strptime(end_date_input, "%Y-%m-%d")
+        except ValueError:
+            return "Invalid date format. Please use the format YYYY-MM-DD."
+        
+        if start_date and end_date:
+           
+            # Fetch entries based on the date range and place
+            entries = get_entries_from_files("weather_userdata", start_date, end_date)
+            
+            if entries:
+                # Plot the entries on the map
+                map_obj = display_entries_on_map(entries)
+                map_file = "weather_map_with_icons.html"
+                
+                # Save the generated map
+                map_obj.save(map_file)
+                
+                # Return the path to the saved map
+                return f"Map has been saved. Open the following link to view it: file://{os.path.abspath(map_file)}"
+            else:
+                return f"No entries found for '{user_place}' within {start_date} to {end_date}."
+    else:
+            return "Invalid date range input. Please provide a valid start and end date."
+
+
+
+
+
+
+
+
+
+
+
 
     # Check if the sentence ends with "Translate" and translate
     if input_text.lower().endswith(" translate"):
@@ -803,13 +1085,11 @@ def generate_response(input_text):
         "onyesha sehemu", "wapi matukio yalitokea",
         "ni maeneo gani yako kwenye rekodi", "ni sehemu zipi zinapatikana"
     ]
-    
     if input_text.lower().strip() in location_triggers:
-        if unique_locations:
-            locations_list = "\n".join(sorted(unique_locations))
-            print(f"\nBIBA: Here are the locations found in the records:\n{locations_list}\n")
-        else:
-            print("\nBIBA: No locations found in the dataset.\n")
+    # Use the show_locations function to get the formatted list of locations
+     locations_display = show_locations()
+    print(f"\nBIBA: {locations_display}\n")
+
 
     search_keywords = [
     # English
@@ -922,8 +1202,6 @@ def translate_text_deep_translator(text):
     result = f"Spanish: {translations['Spanish']}\nFrench: {translations['French']}\nSwahili: {translations['Swahili']}"
     return result
 
-# Function to translate the input text into Spanish, French, and Swahili using googletrans
-
 # Function to switch between translators (deep-translator or googletrans)
 def translate_text(text):
     # Randomly choose whether to use deep-translator or googletrans
@@ -944,9 +1222,12 @@ def get_current_time():
     return f"The current time is {current_time.strftime('%I:%M %p')}."
 
 extract_all_locations('user.atomfiles')
+
 # Chat loop
+
 print("Hello! I am your AI Chatbot BIBA powered by DialoGPT. Type 'exit' to end the conversation.")
 print("You can type your message followed by 'Translate' to get translations in Spanish, French, and Swahili.")
+
 while True:
     user_input = input("You: ")
 
