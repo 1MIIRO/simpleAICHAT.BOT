@@ -371,8 +371,6 @@ def get_weather_data(entry, namespace):
 
     return weather_data
 
-
-
 def get_entries_from_files(folder_path, start_date, end_date):
     entries = []
     
@@ -400,7 +398,6 @@ def get_entries_from_files(folder_path, start_date, end_date):
                         entries.append(weather_data)
 
     return entries
-
 
 # Function to generate a weather icon URL based on the weather code
 def get_weather_icon_url(icon_code):
@@ -464,63 +461,6 @@ def display_entries_on_map(entries):
     # Save the map to an HTML file
     m.save("weather_map_with_icons.html")
     return m
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 def calculate_statistics(folder_path ):
     namespace = {'atom': 'http://www.w3.org/2005/Atom', 'georss': 'http://www.georss.org/georss' , 'ns0':"http://www.georss.org/georss"}
