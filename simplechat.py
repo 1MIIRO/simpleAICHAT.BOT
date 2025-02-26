@@ -275,24 +275,19 @@ def get_event_data(entry, namespace):
                 elev = 0.0  # Default value if conversion fails 
      # Extract title (assuming title contains the location)
      
-    location = extract_location_from_title(title) 
-    if location:
-        # The extract_location_from_title should return the city and place in the correct format
-        city_place = location.split(' ')  # Split by space since both city and place are expected to be in the same string
-        
-        # If there are two parts (city and place), assign them accordingly
+    location_parts = title.split(' - ')
+    if len(location_parts) > 1:
+        city_place = location_parts[-1].split(', ')
         if len(city_place) == 2:
-            city, place = city_place[0], city_place[1]
+            city = city_place[0] 
+            place = city_place[1]  
         else:
-            city, place = '', city_place[0]  # If only the place is found, set it as place
-        
-    if place and place.upper() in state_abbreviations:
-        place = state_abbreviations[place.upper()]  # If place is a state abbreviation, expand it to full name
+            city, place = '', ''  
+    else:
+        city, place = '', ''
 
-    # If there's no city, return only the place (could be a state or a known place)
-    if not city:
-        city = place 
-
+     
+    lat, lon = coordinates.split()   
 
     magnitude = None
     match = re.search(r'M\s*([\d.]+)', title)
@@ -304,6 +299,11 @@ def get_event_data(entry, namespace):
     for category in entry.findall('atom:category', namespace):
         if category.get('label') == 'Age':
             age = category.get('term')
+    
+
+
+
+
 
     # Extract time, month, year, and other details
     timestamp = datetime.fromisoformat(published)
@@ -319,7 +319,8 @@ def get_event_data(entry, namespace):
         'title': title,
         'link': link,
         'published': published,
-        'coordinates': coordinates,
+        'lat' : lat,
+        'lon':lon,
         'elevation': float(elev),  # Ensure elevation is a float
         'age': age,
         'magnitude': magnitude,
@@ -336,27 +337,33 @@ def get_event_data(entry, namespace):
     return event_data
 
 def get_weather_data(entry, namespace):
-    location = entry.find('{http://www.w3.org/2005/Atom}location').text
-    lat, lon = map(float, location.split()) 
-    time_text = entry.find('{http://www.w3.org/2005/Atom}time').text
-    timestamp = datetime.fromisoformat(time_text[:-6])  
-    formatted_time = timestamp.strftime('%Y-%m-%d %H:%M:%S') 
-    formatted_date = timestamp.strftime('%Y-%m-%d')
-    weather_element = entry.find('{http://www.w3.org/2005/Atom}weather')
+    location = entry.find('location', namespace).text
+    lat, lon = location.split()
+    time_text = entry.find('time',namespace).text
+    weather_element = entry.find('weather', namespace)
+    timestamp = datetime.fromisoformat(time_text)
+    time = timestamp.strftime('%H')  # Extract hour as a string
+    month = timestamp.month
+    year = timestamp.year
+    date = timestamp.day
+    date_obj = datetime.fromisoformat(time_text)
+    formatted_date = date_obj.strftime('%Y-%m-%d')
     
-    weather_code = float(weather_element.find('{http://www.w3.org/2005/Atom}weather_code').text)
-    temperature_max = float(weather_element.find('{http://www.w3.org/2005/Atom}temperature_2m_max').text)
-    temperature_min = float(weather_element.find('{http://www.w3.org/2005/Atom}temperature_2m_min').text)
-    temperature_mean = float(weather_element.find('{http://www.w3.org/2005/Atom}temperature_2m_mean').text)
-    sunshine_duration = float(weather_element.find('{http://www.w3.org/2005/Atom}sunshine_duration').text)
-    rain_sum = float(weather_element.find('{http://www.w3.org/2005/Atom}rain_sum').text)
-    snowfall_sum = float(weather_element.find('{http://www.w3.org/2005/Atom}snowfall_sum').text)
-    precipitation_hours = float(weather_element.find('{http://www.w3.org/2005/Atom}precipitation_hours').text)
-    wind_speed_max = float(weather_element.find('{http://www.w3.org/2005/Atom}wind_speed_10m_max').text)
+    weather_code = float(weather_element.find('weather_code', namespace).text)
+    temperature_max = float(weather_element.find('temperature_2m_max' ,namespace).text)
+    temperature_min = float(weather_element.find('temperature_2m_min' , namespace).text)
+    temperature_mean = float(weather_element.find('temperature_2m_mean', namespace).text)
+    sunshine_duration = float(weather_element.find('sunshine_duration' , namespace).text)
+    rain_sum = float(weather_element.find('rain_sum' ,namespace).text)
+    snowfall_sum = float(weather_element.find('snowfall_sum', namespace).text)
+    precipitation_hours = float(weather_element.find('precipitation_hours' ,namespace).text)
+    wind_speed_max = float(weather_element.find('wind_speed_10m_max', namespace).text)
+ 
     
     weather_data = {
-        'location': (lat, lon), 
-        'time': formatted_time, 
+        'lat':lat,
+        'lon' : lon,
+        'time': time, 
         'formatted_date': formatted_date, 
         'weather_code': weather_code,
         'temperature_max': temperature_max,
@@ -367,12 +374,16 @@ def get_weather_data(entry, namespace):
         'snowfall_sum': snowfall_sum,
         'precipitation_hours': precipitation_hours,
         'wind_speed_max': wind_speed_max,
+        'formated_date' :formatted_date
     }
 
     return weather_data
 
-def get_entries_from_files(folder_path, start_date, end_date):
-    entries = []
+def get_entries_from_files(folder_path, entries):
+    weatherneed = []
+    
+    # Define the namespace for XML parsing
+    namespace = {'atom': 'http://www.w3.org/2005/Atom', 'georss': 'http://www.georss.org/georss', 'ns0':"http://www.georss.org/georss"}
     
     # Loop through all XML files in the folder
     for filename in os.listdir(folder_path):
@@ -380,33 +391,143 @@ def get_entries_from_files(folder_path, start_date, end_date):
             file_path = os.path.join(folder_path, filename)
             
             # Parse the XML file
-            root = parse_atom_file(file_path)
-            if root is not None:
-                # Find all the entries in the file
-                for entry in root.findall('{http://www.w3.org/2005/Atom}entry'):
-                    weather_data = get_weather_data(entry, '{http://www.w3.org/2005/Atom}')
-                    entry_date_str = weather_data['formatted_date']
-                    
-                    # Convert the entry date string to a datetime object
-                    try:
-                        entry_date = datetime.strptime(entry_date_str, "%Y-%m-%d")  # Assuming the date is in YYYY-MM-DD format
-                    except ValueError:
-                        continue  # If the date format is invalid, skip this entry
-                    
-                    # Check if the entry's date is within the specified range
-                    if start_date <= entry_date <= end_date:
-                        entries.append(weather_data)
+            tree = ET.parse(file_path)
+            root = tree.getroot()
+            
+            # Loop through each entry in the XML file
+            for entry in root.findall(f'{namespace}entry'):
+                # Get the weather data for this entry
+                weather_data = get_weather_data(entry, namespace)
+                
+                # Extract lat, lon, and date for the current weather entry
+                longitude = weather_data['lon']
+                entry_date_str = weather_data['formatted_date']
+                latitude = weather_data['lat']
 
-    return entries
 
-# Function to generate a weather icon URL based on the weather code
-def get_weather_icon_url(icon_code):
-    return f"http://openweathermap.org/img/wn/{icon_code}@2x.png"
+                # Convert the entry date string to a datetime object
+                try:
+                    entry_date = datetime.strptime(entry_date_str, "%Y-%m-%d")  # Assuming the date is in YYYY-MM-DD format
+                except ValueError:
+                    continue  # If the date format is invalid, skip this entry
+
+                # Compare the lat, lon, and date with entries from the atom files
+                for date,lat, lon in entries:
+                    
+                    # Check if lat, lon, and date match
+                    if lat == latitude and lon == longitude and entry_date.strftime('%Y-%m-%d') == date:
+                        weatherneed.append(weather_data)  # Add matching weather data to weatherneed list
+
+    return weatherneed
+
+def combine_entries_and_weather(entries, weatherneed):
+    combined_data = []
+
+    # Iterate over entries and try to match them with weatherneed data
+    for entry in entries:
+        event_date, lat, lon, magnitude = entry
+        
+        # Iterate over weatherneed to find matching lat, lon
+        for weather_data in weatherneed:
+            weather_lat = weather_data['lat']
+            weather_lon = weather_data['lon']
+            
+            # Check if lat and lon match
+            if str(lat) == str(weather_lat) and str(lon) == str(weather_lon):
+                # Combine the entry data (date, magnitude) with the weather data
+                combined_entry = {
+                    'date': event_date,
+                    'magnitude': magnitude,
+                    'lat': lat,
+                    'lon': lon,
+                    'weather_data': {
+                        'temperature_max': weather_data['temperature_max'],
+                        'temperature_min': weather_data['temperature_min'],
+                        'temperature_mean': weather_data['temperature_mean'],
+                        'sunshine_duration': weather_data['sunshine_duration'],
+                        'rain_sum': weather_data['rain_sum'],
+                        'snowfall_sum': weather_data['snowfall_sum'],
+                        'precipitation_hours': weather_data['precipitation_hours'],
+                        'wind_speed_max': weather_data['wind_speed_max']
+                    }
+                }
+                
+                # Append the combined entry to the result list
+                combined_data.append(combined_entry)
+    
+    return combined_data
 
 # Function to create a popup HTML table for weather data
 def get_weather_icon_url(icon_code):
     return f"http://openweathermap.org/img/wn/{icon_code}@2x.png"
 
+def get_sunshine_duration(sunshine_seconds):
+    return sunshine_seconds / 3600 
+
+def plot_on_map_with_weather(combined_data):
+    # Create the base map centered around a default location (e.g., (0,0))
+    m = folium.Map(location=[0, 0], zoom_start=2)
+    
+    # Create a MarkerCluster to group markers
+    marker_cluster = MarkerCluster().add_to(m)
+
+    # Iterate through each entry in the mapgetdisplay list
+    for combined_entry in combined_data:
+        # Get the date, latitude, longitude, magnitude, and weather data
+        date = combined_entry['date']
+        lat = combined_entry['lat']  # Separate lat
+        lon = combined_entry['lon']  # Separate lon
+        magnitude = combined_entry['magnitude']
+        weather_data = combined_entry['weather_data']
+        
+        lat1, lon1 = map(float, [lat, lon])
+
+        # Extract weather data
+        temperature_max = weather_data['temperature_max']
+        temperature_min = weather_data['temperature_min']
+        temperature_mean = weather_data['temperature_mean']
+        wind_speed_max = weather_data['wind_speed_max']
+        rain_sum = weather_data['rain_sum']
+        sunshine_duration = weather_data['sunshine_duration']
+        
+        # Convert sunshine duration from minutes to hours
+        sunshine_hours = get_sunshine_duration(sunshine_duration)
+        
+        # Define the popup content for the marker
+        popup_content = f"""
+        <table border="1" cellpadding="5" cellspacing="0">
+            <tr><td>Date</td><td>{date}</td></tr>
+            <tr><td>Magnitude</td><td>{magnitude}</td></tr>
+            <tr><td></td><td></td></tr>
+            <tr><td colspan="2"><strong>Weather Data</strong></td></tr>
+            <tr><td>Rainfall Sum</td></tr>
+            <tr><td><img src="{get_weather_icon_url('10d')}" alt="Rain" width="40" height="40"></td><td>{rain_sum} mm</td></tr>
+            <tr><td>Wind Speed</td></tr>
+            <tr><td><img src="{get_weather_icon_url('50d')}" alt="Wind" width="40" height="40"></td><td>{wind_speed_max} km/h</td></tr>
+            <tr><td>Snowfall</td></tr>
+            <tr><td><img src="{get_weather_icon_url('13d')}" alt="Snow" width="40" height="40"></td><td>{weather_data.get('snowfall_sum', 'N/A')} mm</td></tr>
+            <tr><td>Sunshine Duration</td></tr>
+            <tr><td><img src="https://img.icons8.com/ios-filled/50/000000/sun.png" alt="Sunshine" width="40" height="40"></td><td>{sunshine_hours} hours</td></td></tr>
+            <tr><td>Max Temperature</td><td>{temperature_max}°C</td></tr>
+            <tr><td>Min Temperature</td><td>{temperature_min}°C</td></tr>
+            <tr><td>Avg Temperature</td><td>{temperature_mean}°C</td></tr>
+            <tr><td><img src="https://img.icons8.com/ios-filled/50/000000/temperature.png" alt="Temperature" width="40" height="40"></td></tr>
+        </table>
+        """
+
+        # Create a color for the marker based on magnitude
+        marker_color = get_marker_color(magnitude)  # You can implement get_marker_color() or hardcode colors
+
+        # Create the marker on the map
+        folium.Marker(
+            location=[lat1, lon1],
+            popup=folium.Popup(popup_content, max_width=300),
+            icon=folium.Icon(color=marker_color, icon_size=(40, 40))  # Icon size can be adjusted
+        ).add_to(marker_cluster)
+    
+    m.save("weatherearthquake_map_with_icons.html")
+    return m
+    
 # Function to display entries on the map with popup
 def display_entries_on_map(entries):
     # Create a folium map centered at an approximate global location
@@ -718,40 +839,64 @@ def search_atom_files(folder_path, search_place):
     # Ensure the function always returns a tuple
     return result_file_path, len(matching_entries)
 
+def extract_place_from_title(title):
+    if title:
+        # Split the title by spaces and return the last word
+        title_parts = title.split()
+        return title_parts[-1]  # Return the last word in the title
+    return None
+
+def safe_find(entry, tag, namespaces=None, default_value=0.0):
+    try:
+        element = entry.find(tag, namespaces) if namespaces else entry.find(tag)
+        return element.text if element is not None else default_value
+    except Exception as e:
+        print(f"Error extracting {tag}: {e}")
+        return default_value
+
 def parse_atom_files_by_place_and_date(folder_path, start_date, end_date, place):
+    namespace = {'atom': 'http://www.w3.org/2005/Atom', 'georss': 'http://www.georss.org/georss', 'ns0': "http://www.georss.org/georss"}
     entries = []
+    
     for filename in os.listdir(folder_path):
         if filename.endswith(".atom"):
             file_path = os.path.join(folder_path, filename)
             tree = ET.parse(file_path)
             root = tree.getroot()
-            
-            for entry in root.findall("{http://www.w3.org/2005/Atom}entry"):
-                title = entry.find("{http://www.w3.org/2005/Atom}title").text
-                updated = entry.find("{http://www.w3.org/2005/Atom}updated").text
-                point = entry.find("{http://www.georss.org/georss}point").text if entry.find("{http://www.georss.org/georss}point") is not None else None
+
+            # Iterate through all entries in the Atom file
+            for entry in root.findall('atom:entry', namespace):
+                # Use get_event_data to extract data
+                event_data = get_event_data(entry, namespace)
+
+                # Extract title to find magnitude
+                title = safe_find(entry, '{http://www.w3.org/2005/Atom}title', namespaces=namespace)
                 
-                if title and updated and point:
-                    title_parts = title.split()
-                    location_in_title = title_parts[-1]  
+                # Extract magnitude from title using regex
+                magnitude_match = re.search(r'M\s([\d\.]+)', title)
+                if magnitude_match:
+                    magnitude = float(magnitude_match.group(1))
+                    print(f"Matching coordinates found! Magnitude: {magnitude}")
+                else:
+                    magnitude = 0.0  # Default value if no magnitude found
+
+                # Extract the date and place from the event data
+                date = datetime.strptime(event_data['formatted_date'], '%Y-%m-%d')
+                event_place = event_data['place']
                 
-                    if location_in_title.lower() == place.lower():
-                        date = datetime.strptime(updated.split('T')[0], '%Y-%m-%d')
-                        if start_date <= date <= end_date:
-                            magnitude = None
-                            match = re.search(r'M\s([-]?[\d\.]+)', title)  
-                            if match:
-                                try:
-                                    magnitude = float(match.group(1))  
-                                except ValueError as e:
-                                    print(f"Error converting magnitude for {title}: {e}")
-                                    continue
-                            else:
-                                print(f"No magnitude found in title for {title}")
-                                continue
-                            
-                            entries.append((date, point, magnitude))  
+                # Check if the place matches and the date is within the specified range
+                if event_place and event_place.lower() == place.lower() and start_date <= date <= end_date:
+                    # Extract lat and lon from event data
+                    lat = event_data['lat']
+                    lon = event_data['lon']
+                    
+                    # Add the relevant data to the entries list
+                    entries.append((date, lat, lon, magnitude))
+    
     return entries
+
+
+    
 
 def get_marker_color(magnitude):
     if magnitude >= 5:
@@ -883,48 +1028,6 @@ def generate_response(input_text):
     if input_text.lower() == "help":
         return show_help()
     
-    if input_text.lower() == "history":
-        # Request the start and end dates
-        start_date_input = input("Enter the start date (YYYY-MM-DD): ")
-        end_date_input = input("Enter the end date (YYYY-MM-DD): ")
-
-        try:
-            start_date = datetime.strptime(start_date_input, "%Y-%m-%d")
-            end_date = datetime.strptime(end_date_input, "%Y-%m-%d")
-        except ValueError:
-            return "Invalid date format. Please use the format YYYY-MM-DD."
-        
-        if start_date and end_date:
-           
-            # Fetch entries based on the date range and place
-            entries = get_entries_from_files("weather_userdata", start_date, end_date)
-            
-            if entries:
-                # Plot the entries on the map
-                map_obj = display_entries_on_map(entries)
-                map_file = "weather_map_with_icons.html"
-                
-                # Save the generated map
-                map_obj.save(map_file)
-                
-                # Return the path to the saved map
-                return f"Map has been saved. Open the following link to view it: file://{os.path.abspath(map_file)}"
-            else:
-                return f"No entries found for '{user_place}' within {start_date} to {end_date}."
-    else:
-            return "Invalid date range input. Please provide a valid start and end date."
-
-
-
-
-
-
-
-
-
-
-
-
     # Check if the sentence ends with "Translate" and translate
     if input_text.lower().endswith(" translate"):
         text_to_translate = input_text[:-9].strip()  # Remove the word "Translate"
@@ -987,8 +1090,35 @@ def generate_response(input_text):
         file_path, count = search_magnitude('user.atomfiles', search_type)
         print(f"Magnitude search results saved to {file_path}")
         return f"Magnitude search completed. Data saved in: {file_path}"
+    
+    if input_text.lower() == "i want to see earthquake and weather on the map":
+        choice = input("Enter 'single' for a single date or 'range' for a date range: ").lower()
 
+        if choice == 'single':
+            user_input_date = input("Enter the date (YYYY, YYYY-MM, or 'all' for all data): ")
+            start_date, end_date = get_single_date(user_input_date)
+        elif choice == 'range':
+            start_date_input = input("Enter the start date (YYYY-MM-DD): ")
+            end_date_input = input("Enter the end date (YYYY-MM-DD): ")
+            start_date, end_date = get_date_range(start_date_input, end_date_input)
+        else:
+            return "Invalid choice. Please enter 'single' or 'range'."
 
+        if start_date and end_date:
+            user_place = input("Enter the place (e.g., California): ")
+            entries = parse_atom_files_by_place_and_date("user.atomfiles", start_date, end_date, user_place)
+            weather = get_entries_from_files("weather_userdata", entries)
+            display = combine_entries_and_weather(entries, weather)
+
+            if entries:
+                map_obj = plot_on_map(display)
+                map_file = "weatherearthquake_map_with_icons.html"
+                map_obj.save(map_file)
+                return f"Map has been saved. Open the following link to view it: file://{os.path.abspath(map_file)}"
+            else:
+                return f"No entries found for '{user_place}' within {start_date} to {end_date}."
+        else:
+            return "Invalid date range input."
 
     # Add the user input to the conversation history (this will be used for context generation)
     conversation_history.append(f"Human: {input_text}")
@@ -1027,9 +1157,11 @@ def generate_response(input_text):
     ]
     if input_text.lower().strip() in location_triggers:
     # Use the show_locations function to get the formatted list of locations
-     locations_display = show_locations()
-    print(f"\nBIBA: {locations_display}\n")
+        show_locations()
+    
 
+
+    
 
     search_keywords = [
     # English
